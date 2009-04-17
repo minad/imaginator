@@ -5,7 +5,7 @@ require 'monitor'
 require 'drb'
 
 class Imaginator
-  VERSION = "0.1.1"
+  VERSION = "0.1.2"
 
   class LaTeX
     def initialize(opts = {})
