@@ -5,7 +5,7 @@ require 'monitor'
 require 'drb'
 
 class Imaginator
-  VERSION = "0.1.2"
+  VERSION = '0.1.3'
 
   class LaTeX
     def initialize(opts = {})
@@ -140,6 +140,9 @@ END
     def run
       if !running?
         raise(ArgumentError, "No target directory given") if !@dir
+        if @uri =~ %r{^drbunix://(.+)$}
+	  File.unlink($1) rescue nil
+        end
         @server = Imaginator.new(@dir)
         yield(@server) if block_given?
         DRb.start_service(@uri, @server)
