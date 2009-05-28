@@ -5,7 +5,7 @@ require 'monitor'
 require 'drb'
 
 class Imaginator
-  VERSION = '0.1.3'
+  VERSION = '0.1.4'
 
   class LaTeX
     def initialize(opts = {})
@@ -134,29 +134,21 @@ END
 
     def get
       raise(ArgumentError, "No URI given") if !@uri
-      @server || (@client ||= DRb::DRbObject.new(nil, @uri))
+      @client ||= DRb::DRbObject.new(nil, @uri)
     end
 
     def run
-      if !running?
-        raise(ArgumentError, "No target directory given") if !@dir
-        if @uri =~ %r{^drbunix://(.+)$}
-	  File.unlink($1) rescue nil
-        end
-        @server = Imaginator.new(@dir)
-        yield(@server) if block_given?
-        DRb.start_service(@uri, @server)
-        Thread.new do
-          loop { @server.process }
+      raise(ArgumentError, "No target directory given") if !@dir
+      pid = Process.fork do
+        begin
+          server = Imaginator.new(@dir)
+          DRb.start_service(@uri, server)
+          yield(server) if block_given?
+          loop { server.process }
+        rescue Errno::EADDRINUSE
         end
       end
-    end
-
-    def running?
-      raise(ArgumentError, "No URI given") if !@uri
-      @server || DRb::DRbObject.new(nil, @uri).respond_to?(:enqueue)
-    rescue
-      false
+      Process.detach(pid)
     end
   end
 
@@ -193,8 +185,9 @@ END
   def result(name)
     file = File.join(@dir, name)
     if !File.exists?(file)
-      while enqueued?(name) do
-        sleep 0.1
+      20.times do
+        break if !enqueued?(name)
+        sleep 0.5
       end
     end
     raise(RuntimeError, 'Image could not be generated') if !File.exists?(file)
