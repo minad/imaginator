@@ -3,9 +3,10 @@ require 'fileutils'
 require 'thread'
 require 'monitor'
 require 'drb'
+require 'timeout'
 
 class Imaginator
-  VERSION = '0.1.4'
+  VERSION = '0.1.5'
 
   class LaTeX
     def initialize(opts = {})
@@ -126,39 +127,62 @@ END
     end
   end
 
-  @uri = nil
-  @dir = nil
+  class Server
+    def initialize(renderer)
+      @renderer = renderer
+      @queue = []
+      @queue.extend(MonitorMixin)
+      @empty = @queue.new_cond
+    end
 
-  class<< self
-    attr_accessor :uri, :dir
+    def enqueue(name, type, code)
+      @queue.synchronize do
+	@queue << [name, type, code]
+        @empty.signal
+      end
+    end
 
-    def get
-      raise(ArgumentError, "No URI given") if !@uri
-      @client ||= DRb::DRbObject.new(nil, @uri)
+    def enqueued?(name)
+      @queue.synchronize do
+        @queue.any? do |x|
+          x[0] == name
+        end
+      end
     end
 
     def run
-      raise(ArgumentError, "No target directory given") if !@dir
-      pid = Process.fork do
-        begin
-          server = Imaginator.new(@dir)
-          DRb.start_service(@uri, server)
-          yield(server) if block_given?
-          loop { server.process }
-        rescue Errno::EADDRINUSE
+      loop do
+	name, type, code = @queue.synchronize do
+          return if !wait_while_empty
+          @queue.first
+        end
+	@renderer[type].render(code, name) rescue nil
+        @queue.synchronize do
+          @queue.shift
         end
       end
-      Process.detach(pid)
+    end
+
+    private
+
+    def wait_while_empty
+      Timeout.timeout(5) do
+        while @queue.empty?
+          @empty.wait
+        end
+        return true
+      end
+    rescue Timeout::Error => ex
+      false
     end
   end
 
-  def initialize(dir)
+  def initialize(uri, dir)
+    @uri = uri
     @dir = dir
     @renderer = {}
-    @queue = []
-    @queue.extend(MonitorMixin)
-    @empty = @queue.new_cond
     FileUtils.mkdir_p(@dir, :mode => 0755)
+    yield(self) if block_given?
   end
 
   def add_renderer(type, renderer)
@@ -174,10 +198,7 @@ END
     name = Digest::MD5.hexdigest(code) + '.' + format
     file = File.join(@dir, name)
     if !File.exists?(file)
-      @queue.synchronize do
-        @queue << [name, type, code]
-        @empty.signal
-      end
+      server.enqueue(file, type, code)
     end
     name
   end
@@ -186,7 +207,7 @@ END
     file = File.join(@dir, name)
     if !File.exists?(file)
       20.times do
-        break if !enqueued?(name)
+        break if !server.enqueued?(file)
         sleep 0.5
       end
     end
@@ -194,26 +215,25 @@ END
     file
   end
 
-  def process
-    name, type, code = @queue.synchronize do
-      while @queue.empty? do
-        @empty.wait
+  def server
+    begin
+      @server ||= DRb::DRbObject.new(nil, @uri)
+      @server.respond_to? :enqueue
+      @server
+    rescue
+      if @uri =~ %r{^drbunix://(.+)$}
+        File.unlink($1) rescue nil
       end
-      @queue.first
-    end
-    @renderer[type].render(code, File.join(@dir, name)) rescue nil
-    @queue.synchronize do
-      @queue.shift
-    end
-  end
-
-  private
-
-  def enqueued?(name)
-    @queue.synchronize do
-      @queue.any? do |x|
-        x[0] == name
+      server = Server.new(@renderer)
+      drb_server = DRb.start_service(@uri, server)
+      Thread.new do
+	server.run
+	drb_server.stop_service
+        DRb.primary_server = nil if DRb.primary_server == drb_server
+	@server = nil
       end
+      @server = server
     end
   end
 end
+
